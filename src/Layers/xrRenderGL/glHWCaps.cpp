@@ -67,6 +67,20 @@ void CHWCaps::Update()
     // Scissoring
     bScissor = TRUE;
 
+    // Float colour buffer support. The Android loader (gladLoadGLES2) only sets
+    // the GLAD_GL_ES_VERSION_* flags, so the desktop GLAD_GL_ARB_* checks never
+    // fire there -- ask for the ES extensions explicitly.
+    bColorBufferHalfFloat = GLAD_GL_ES_VERSION_3_2 || CHW::HasExtension("GL_EXT_color_buffer_half_float") ||
+        CHW::HasExtension("GL_EXT_color_buffer_float");
+    bFloatBlend = GLAD_GL_ES_VERSION_3_2 || CHW::HasExtension("GL_EXT_float_blend") ||
+        CHW::HasExtension("GL_EXT_color_buffer_float");
+    Msg("* GL caps: RGBA16F color-renderable=%s, float blend=%s", bColorBufferHalfFloat ? "yes" : "NO",
+        bFloatBlend ? "yes" : "NO");
+    if (!bColorBufferHalfFloat)
+        Msg("! This GPU reports no RGBA16F color-renderable support, but the deferred "
+            "g-buffer position target is unconditionally RGBA16F. Expect a black or "
+            "corrupt screen; this needs a real 8-bit g-buffer path, not just a flag.");
+
     // Stencil relative caps
     soInc = D3DSTENCILOP_INCRSAT;
     soDec = D3DSTENCILOP_DECRSAT;

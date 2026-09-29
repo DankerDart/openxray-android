@@ -82,7 +82,9 @@ void CRT::reset_begin()
 
 void CRT::reset_end()
 {
-    create(cName.c_str(), dwWidth, dwHeight, fmt, sampleCount, { dwFlags });
+    // CRT::create() has no slices/flags concept, so pass the defaults rather
+    // than accidentally feeding dwFlags into the slices_num slot.
+    create(cName.c_str(), dwWidth, dwHeight, fmt, sampleCount);
 }
 
 void CRT::resolve_into(CRT& destination) const
@@ -94,8 +96,7 @@ void CRT::resolve_into(CRT& destination) const
     RCache.set_RT(pRT, 0);
     RCache.set_RT(destination.pRT, 1);
 
-    [[maybe_unused]] GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
-    VERIFY(status == GL_FRAMEBUFFER_COMPLETE);
+    XR_GL_CHECK_FBO();
     CHK_GL(glDrawBuffers(std::size(buffers), buffers));
 
     CHK_GL(glBlitFramebuffer(0, 0, dwWidth, dwHeight, 0, 0, destination.dwWidth, destination.dwHeight,

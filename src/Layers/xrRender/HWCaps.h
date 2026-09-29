@@ -74,6 +74,15 @@ public:
     bool hasFixedPipeline{};     // device has support for fixed pipeline
     bool useCombinedSamplers{};  // texture and sampler settings represented as single object
 
+    // RGBA16F is the deferred g-buffer's position target and the light
+    // accumulator. It is only colour-renderable with EXT_color_buffer_half_float
+    // (GLES 3.0) or as core GLES 3.2, and blending into it needs EXT_float_blend
+    // or GLES 3.2. Several Mali and Adreno parts report neither, and a
+    // framebuffer with an unsupportable attachment is simply incomplete, which
+    // shows up as a black screen or a driver abort rather than a clean error.
+    bool bColorBufferHalfFloat{};
+    bool bFloatBlend{};
+
 public:
     void Update(void);
 };

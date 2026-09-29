@@ -292,8 +292,14 @@ void CRender::create()
         Msg("* HWDST/PCF supported and used");
     }
 
-    o.fp16_filter = true;
-    o.fp16_blend = true;
+    // Half-float accumulator. Ask the driver rather than assuming: blending into
+    // an RGBA16F target needs EXT_float_blend or GLES 3.2, and several Mali and
+    // Adreno parts report neither. The old hardcoded "true" left the blend state
+    // on against an unsupported target, and now at least the mismatch is
+    // reported at startup instead of showing up as a corrupt or missing image.
+    o.fp16_filter = HW.Caps.bColorBufferHalfFloat;
+    o.fp16_blend = HW.Caps.bColorBufferHalfFloat && HW.Caps.bFloatBlend;
+    Msg("* fp16 filter=%s, fp16 blend=%s", o.fp16_filter ? "yes" : "no", o.fp16_blend ? "yes" : "no");
 
     // emulate ATI-R4xx series
     if (strstr(Core.Params, "-r4xx"))

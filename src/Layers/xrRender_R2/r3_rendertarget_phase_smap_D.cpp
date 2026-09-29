@@ -2,6 +2,17 @@
 
 namespace xray::render::RENDER_NAMESPACE
 {
+// The GL backend renders the shadow maps depth-only. rt_smap_surf exists purely
+// to give the FBO a color attachment, and at 2048x2048 with a D3DFMT_R5G6B5
+// format that GL expands to RGBA8 it is a 16 MB texture that the sun pass then
+// loads and stores for nothing, once per cascade and once per spot light. A
+// depth-only FBO is legal in GLES 3.x, so skip the attachment entirely.
+#if defined(USE_OGL)
+#   define OXR_SMAP_COLOR_ATTACHMENT nullptr
+#else
+#   define OXR_SMAP_COLOR_ATTACHMENT rt_smap_surf
+#endif
+
 void CRenderTarget::phase_smap_direct(CBackend& cmd_list, light *L, u32 sub_phase)
 {
     if (sub_phase == SE_SUN_RAIN_SMAP)
@@ -14,7 +25,7 @@ void CRenderTarget::phase_smap_direct(CBackend& cmd_list, light *L, u32 sub_phas
     {
         rt_smap_depth->set_slice_write(cmd_list.context_id, sub_phase);
         cmd_list.set_pass_targets(
-            rt_smap_surf,
+            OXR_SMAP_COLOR_ATTACHMENT,
             nullptr,
             nullptr,
             rt_smap_depth
@@ -32,6 +43,9 @@ void CRenderTarget::phase_smap_direct_tsh(CBackend& cmd_list, light *L, u32 sub_
     cmd_list.set_ColorWriteEnable();
     //	Prepare viewport for shadow map rendering
     RImplementation.rmNormal(cmd_list);
+#if !defined(USE_OGL)
     cmd_list.ClearRT(cmd_list.get_RT(), { 1.0f, 1.0f, 1.0f, 1.0f }); // color_rgba(127, 127, 12, 12);
+#endif
 }
 } // namespace xray::render::RENDER_NAMESPACE
+#undef OXR_SMAP_COLOR_ATTACHMENT

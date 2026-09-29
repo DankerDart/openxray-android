@@ -8,4 +8,6 @@ struct XRPHYSICS_API ph_console
     static float phBreakCommonFactor; //= 0.01f;
     static float phRigidBreakWeaponFactor; //= 1.f;
     static float ph_step_time; //=fixed_step;
+    // Upper bound on ODE substeps per frame. See CPHWorld::FrameStep.
+    static int ph_max_substeps; //=3;
 };

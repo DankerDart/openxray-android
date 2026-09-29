@@ -469,7 +469,17 @@ void CSheduler::Update()
 #ifdef DEBUG_SCHEDULER
     Msg("SCHEDULER: PROCESS STEP FINISHED %d", Device.dwFrame);
 #endif
+    // The scheduler spends a soft time budget on object updates, and it adapts
+    // that budget *upwards* whenever it maxes out (see ProcessStep). On a phone
+    // that means a device already struggling for frame time hands up to 66ms of
+    // a ~250ms frame to AI updates, which makes the frame slower, which raises
+    // the budget again. Cap it much lower there: objects still get updated, just
+    // spread over more frames, and the frame rate can recover.
+#if defined(XR_PLATFORM_ANDROID)
+    clamp(psShedulerTarget, 3.f, 10.f);
+#else
     clamp(psShedulerTarget, 3.f, 66.f);
+#endif
     psShedulerCurrent = 0.9f * psShedulerCurrent + 0.1f * psShedulerTarget;
     stats.Load = psShedulerCurrent;
 

@@ -12,6 +12,12 @@
 
 class CScriptThread;
 
+// Wall-clock budget in milliseconds for one frame's worth of script updates
+// within a single CScriptProcess. CScriptProcess::update() sweeps its scripts
+// round-robin until this is exhausted, so the cost of the Lua VM per frame stays
+// bounded while every script still gets serviced.
+XRSCRIPTENGINE_API extern float ps_script_budget_ms;
+
 class XRSCRIPTENGINE_API CScriptProcess
 {
     friend class CScriptEngine;

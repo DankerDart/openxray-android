@@ -277,8 +277,11 @@ void CRenderTarget::phase_combine()
     if (_menu_pp)
         PP_Complex = FALSE;
 
-    // HOLGER - HACK
-    PP_Complex = TRUE;
+    // HOLGER - HACK: kept behind r2_complex_pp. Forcing this on costs an extra
+    // full-resolution LDR target (rt_Color) plus a full-resolution phase_pp
+    // pass on every single frame, which is pure fill-rate on a mobile GPU.
+    if (ps_r2_complex_pp)
+        PP_Complex = TRUE;
 
     // Combine everything + perform AA
     if (RImplementation.o.msaa)
