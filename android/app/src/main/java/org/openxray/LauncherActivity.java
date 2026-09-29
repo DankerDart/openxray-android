@@ -49,6 +49,7 @@ public class LauncherActivity extends AppCompatActivity {
     private Button mBtnBrowsePath;
     private Button mBtnCheckPath;
     private Button mBtnViewLogs;
+    private Button mBtnSendLogs;
     private TextView mTextPathStatus;
 
     private RadioGroup mRadioGroupGameMode;
@@ -117,12 +118,16 @@ public class LauncherActivity extends AppCompatActivity {
         mBtnBrowsePath = findViewById(R.id.btn_browse_path);
         mBtnCheckPath = findViewById(R.id.btn_check_path);
         mBtnViewLogs = findViewById(R.id.btn_view_logs);
+        mBtnSendLogs = findViewById(R.id.btn_send_logs);
         mTextPathStatus = findViewById(R.id.text_path_status);
 
         mBtnBrowsePath.setOnClickListener(v -> openFolderPicker());
         mBtnCheckPath.setOnClickListener(v -> checkGamePathStatus());
         if (mBtnViewLogs != null) {
             mBtnViewLogs.setOnClickListener(v -> showLogsDialog());
+        }
+        if (mBtnSendLogs != null) {
+            mBtnSendLogs.setOnClickListener(v -> sendLogs());
         }
 
         mRadioGroupGameMode = findViewById(R.id.radiogroup_gamemode);
@@ -523,6 +528,70 @@ public class LauncherActivity extends AppCompatActivity {
         gameIntent.putExtra("extra_touch_scale", scale);
 
         startActivity(gameIntent);
+    }
+
+    // The mode folder is where every log actually lives: the engine writes its
+    // own log there, the native frame watchdog writes frame_trace.log there
+    // after chdir'ing into it, and AppLog is initialised with this path.
+    private File currentLogDir() {
+        String basePath = mEditGamePath.getText().toString().trim();
+        String pathStr = (basePath != null && !basePath.isEmpty())
+            ? new File(basePath, selectedGameMode()).getAbsolutePath()
+            : basePath;
+        return (pathStr != null && !pathStr.isEmpty())
+            ? new File(pathStr)
+            : new File(Environment.getExternalStorageDirectory(), "OpenXRay");
+    }
+
+    /**
+     * Bundles every log we have and hands it to the system share sheet.
+     *
+     * Zipping plus two logcat dumps is far too much work for the main thread:
+     * logcat alone can produce tens of megabytes, and blocking there is an ANR.
+     */
+    private void sendLogs() {
+        final File logDir = currentLogDir();
+        final String mode = selectedGameMode();
+
+        if (!logDir.isDirectory()) {
+            Toast.makeText(this, "No log folder yet at " + logDir.getAbsolutePath()
+                    + " — start the game once first", Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        mBtnSendLogs.setEnabled(false);
+        mBtnSendLogs.setText("PACKING...");
+        android.app.ProgressDialog progress = new android.app.ProgressDialog(this);
+        progress.setMessage("Collecting logs...");
+        progress.setCancelable(false);
+        progress.show();
+
+        new Thread(() -> {
+            File zip = null;
+            String error = null;
+            try {
+                zip = LogShare.build(this, logDir, mode);
+                if (zip == null) {
+                    error = "Could not read the log files in " + logDir.getAbsolutePath();
+                }
+            } catch (Throwable t) {
+                AppLog.e("Launcher", "Diagnostic bundle failed", t);
+                error = String.valueOf(t.getMessage());
+            }
+            final File finalZip = zip;
+            final String finalError = error;
+            runOnUiThread(() -> {
+                progress.dismiss();
+                mBtnSendLogs.setEnabled(true);
+                mBtnSendLogs.setText("SEND LOGS");
+                if (finalZip != null) {
+                    // startActivity has to happen here, not on the worker.
+                    LogShare.share(this, finalZip);
+                } else if (finalError != null) {
+                    Toast.makeText(this, finalError, Toast.LENGTH_LONG).show();
+                }
+            });
+        }, "LogShareThread").start();
     }
 
     private void showLogsDialog() {

@@ -126,6 +126,19 @@
                             android:textSize="11sp"
                             android:textStyle="bold"
                             android:paddingHorizontal="8dp" />
+
+                        <Button
+                            android:id="@+id/btn_send_logs"
+                            android:layout_width="0dp"
+                            android:layout_height="38dp"
+                            android:layout_weight="1"
+                            android:layout_marginStart="8dp"
+                            android:background="@drawable/btn_launch_new"
+                            android:text="SEND LOGS"
+                            android:textColor="@color/status_green"
+                            android:textSize="11sp"
+                            android:textStyle="bold"
+                            android:paddingHorizontal="8dp" />
                     </LinearLayout>
 
                     <TextView

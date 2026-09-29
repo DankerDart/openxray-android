@@ -40,8 +40,40 @@ if (ANDROID)
     # CMAKE_ANDROID_NDK_VERSION, which the NDK r27 toolchain never sets, so the
     # comparison falls through and -fuse-ld=gold is used instead of lld. That
     # breaks linking as soon as LTO is on.
-    set(CMAKE_C_LINK_OPTIONS_IPO "-fuse-ld=lld")
-    set(CMAKE_CXX_LINK_OPTIONS_IPO "-fuse-ld=lld")
+    #
+    # Full LTO, not ThinLTO (CMake's default is -flto=thin). ThinLTO keeps the
+    # per-module partitioning barrier, so it can still emit calls between
+    # translation units that full LTO would have inlined; the engine is one
+    # giant call graph and its cost is dominated by that. -flto-job-count lets
+    # the fat-LTO codegen run across cores, otherwise the link step is
+    # single-threaded and takes forever on this codebase.
+    if (NOT DEFINED XRAY_LTO_JOB_COUNT)
+        include(ProcessorCount)
+        ProcessorCount(XRAY_LTO_JOB_COUNT)
+        if (XRAY_LTO_JOB_COUNT EQUAL 0)
+            set(XRAY_LTO_JOB_COUNT 1)
+        endif()
+    endif()
+    message(STATUS "LTO_JOB_COUNT:        ${XRAY_LTO_JOB_COUNT}")
+    # clang emits bitcode-only objects for plain -flto, so the fat-LTO link sees
+    # every object and not a stale pre-LTO copy.
+    set(CMAKE_C_COMPILE_OPTIONS_IPO "-flto")
+    set(CMAKE_CXX_COMPILE_OPTIONS_IPO "-flto")
+    # These have to be CMake *lists* (semicolon separated), not one string with
+    # spaces: CMake quotes a plain string and hands the linker driver a single
+    # argument, which it then rejects with "invalid linker name in argument".
+    # The lld in NDK r27 is 18, which has no -flto-job-count (that arrived in a
+    # later lld); --threads is the knob it does have, and it is what governs the
+    # LTO plugin's codegen here.
+    set(CMAKE_C_LINK_OPTIONS_IPO "-fuse-ld=lld;-flto;-Wl,--threads=${XRAY_LTO_JOB_COUNT}")
+    set(CMAKE_CXX_LINK_OPTIONS_IPO "-fuse-ld=lld;-flto;-Wl,--threads=${XRAY_LTO_JOB_COUNT}")
+
+    # NDK r27 already defaults the release flags to "-O3 -DNDEBUG", but that is a
+    # toolchain default, not something this build asked for. Append -O3 so a
+    # toolchain change cannot quietly drop the engine to -O2: it is appended
+    # last, so it wins over anything earlier in the string.
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} -O3")
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -O3")
 else()
     check_ipo_supported(RESULT LTO_IS_SUPPORTED)
     if (LTO_IS_SUPPORTED)

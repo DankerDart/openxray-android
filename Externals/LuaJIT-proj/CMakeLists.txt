@@ -603,6 +603,12 @@ target_compile_options(xrLuaJIT
 set_target_properties(xrLuaJIT PROPERTIES
     PREFIX ""
     UNITY_BUILD OFF
+    # LuaJIT builds its VM with dynasm and feeds the generated file back in as
+    # C++ (lj_vm.S, with LANGUAGE CXX). LTO cannot see through that: it is not
+    # a translation unit LLVM is willing to rewrite, and the assembler-derived
+    # object breaks fat LTO. LuaJIT also ships as its own shared library, so
+    # whole-program LTO across the engine boundary would buy nothing here.
+    INTERPROCEDURAL_OPTIMIZATION OFF
 )
 
 install(

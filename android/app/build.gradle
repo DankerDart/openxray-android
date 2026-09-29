@@ -53,13 +53,13 @@ android {
             signingConfig signingConfigs.release
             externalNativeBuild {
                 cmake {
-                    // The NDK toolchain already compiles Release with -O3 and
-                    // -flto=thin, but it does not add -flto to the link line, so
-                    // no LTO was ever performed. Keep 16k page alignment and
-                    // pass -flto through to the linker to make LTO real.
+                    // -O3 and full (-flto, not -flto=thin) LTO, with the codegen
+                    // spread over all cores, are set in cmake/XRay.Build.cmake for
+                    // every Android release build. The linker flags here only add
+                    // 16k page alignment, which the NDK does not do by default.
                     arguments "-DCMAKE_BUILD_TYPE=Release",
-                              "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384 -flto=thin",
-                              "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-z,max-page-size=16384 -flto=thin"
+                              "-DCMAKE_SHARED_LINKER_FLAGS=-Wl,-z,max-page-size=16384",
+                              "-DCMAKE_EXE_LINKER_FLAGS=-Wl,-z,max-page-size=16384"
                 }
             }
         }

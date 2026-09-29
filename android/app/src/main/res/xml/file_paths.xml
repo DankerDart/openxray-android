@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Roots the diagnostic-bundle FileProvider may hand out.
+
+  external-path has to cover the whole external storage root, not just
+  /OpenXRay: the launcher lets the tester point -game_path at any directory, and
+  the bundle is written next to the game data, so the path is not knowable
+  ahead of time. The provider is not exported and every URI is handed out with a
+  one-shot read grant for a single file, so this does not expose anything the
+  app's existing MANAGE_EXTERNAL_STORAGE permission did not already reach.
+-->
+<paths>
+    <external-path name="external" path="." />
+    <files-path name="files" path="." />
+    <cache-path name="cache" path="." />
+</paths>

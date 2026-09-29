@@ -54,6 +54,19 @@
             android:screenOrientation="sensorLandscape"
             android:theme="@style/Theme.OpenXRay.Fullscreen">
         </activity>
+
+        <!-- Serves the diagnostic zip to whatever app the tester shares it with.
+             Shares go through a content:// URI because passing a file:// URI to
+             another app has been an IllegalArgumentException since API 24. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="org.openxray.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 
 </manifest>
