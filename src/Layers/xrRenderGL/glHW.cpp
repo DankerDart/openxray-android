@@ -200,11 +200,16 @@ void CHW::CreateDevice(SDL_Window* hWnd)
     {
         UpdateVSync();
 
+        // Every driver-side message routes through this callback, so enabling it
+        // in a shipping build costs a branch per message for diagnostics nobody
+        // is reading. Debug/Mixed builds keep it for PIX_EVENT frame analysis.
+#if defined(DEBUG) || defined(_DEBUG) || XRAY_ENABLE_GL_ERROR_CHECK
         if (glDebugMessageCallback)
         {
             CHK_GL(glEnable(GL_DEBUG_OUTPUT));
             CHK_GL(glDebugMessageCallback((GLDEBUGPROC)OnDebugCallback, nullptr));
         }
+#endif
     }
 
     int iMaxVTFUnits, iMaxCTIUnits;

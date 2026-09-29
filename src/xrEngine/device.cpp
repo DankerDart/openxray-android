@@ -104,8 +104,14 @@ constexpr const char* TAG = "OpenXRayFT";
 std::atomic<int>      g_phase{PH_FRAME_START};
 std::atomic<uint64_t> g_frame{0};
 std::atomic<uint64_t> g_hb{0};
-std::atomic<uint64_t> g_verbose_until{300};
 std::atomic<bool>     g_installed{false};
+
+// How long per-phase logging stays on after startup and after a level change.
+// Measured in frames, so keep it small: at 4 fps the previous 300-frame window
+// meant a minute and a half of flushing a log line per phase, which is I/O the
+// frame is paying for.
+constexpr uint64_t kVerboseFrames = 40;
+std::atomic<uint64_t> g_verbose_until{kVerboseFrames};
 
 pthread_t g_frame_thread;
 std::atomic<int> g_probe_pending{0};
@@ -137,7 +143,7 @@ FILE* g_ftf = nullptr;
 pthread_mutex_t g_ftf_mtx = PTHREAD_MUTEX_INITIALIZER;
 char g_ftf_path[1024] = { 0 };
 
-void emit_to_file(const char* buf)
+void emit_to_file(const char* buf, bool flush_now)
 {
     char stamp[32] = { 0 };
     timespec ts{};
@@ -153,11 +159,16 @@ void emit_to_file(const char* buf)
         fputs(stamp, g_ftf);
         fputs(buf, g_ftf);
         fputc('\n', g_ftf);
-        fflush(g_ftf);
+        if (flush_now)
+            fflush(g_ftf);
     }
     pthread_mutex_unlock(&g_ftf_mtx);
 }
 
+// Per-frame phase markers. This is the hot path -- a handful per frame, on the
+// frame thread -- and an fflush is a write(2) into the storage stack, so leave
+// these to stdio's own buffering. Losing the last few lines to a hard kill is
+// fine; a stall dump goes through alog(), which does force the stream out.
 void vlog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void vlog(const char* fmt, ...)
 {
@@ -169,9 +180,11 @@ void vlog(const char* fmt, ...)
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     __android_log_write(ANDROID_LOG_INFO, TAG, buf);
-    emit_to_file(buf);
+    emit_to_file(buf, /*flush_now*/ false);
 }
 
+// Stalls, crashes and state changes. Rare, and the process may be about to die,
+// so always force the line out to disk.
 void alog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
 void alog(const char* fmt, ...)
 {
@@ -181,7 +194,7 @@ void alog(const char* fmt, ...)
     vsnprintf(buf, sizeof(buf), fmt, ap);
     va_end(ap);
     __android_log_write(ANDROID_LOG_ERROR, TAG, buf);
-    emit_to_file(buf);
+    emit_to_file(buf, /*flush_now*/ true);
 }
 
 // --- backtrace captured on the frame thread inside the probe handler ---
@@ -469,10 +482,10 @@ void install()
 void level_changed(IGame_Level* lvl)
 {
     const uint64_t fr = g_frame.load(std::memory_order_relaxed);
-    g_verbose_until.store(fr + 300, std::memory_order_relaxed);
+    g_verbose_until.store(fr + kVerboseFrames, std::memory_order_relaxed);
     g_trail_n.store(0, std::memory_order_relaxed);
     alog("[ft] === LEVEL STATE CHANGE: g_pGameLevel=%p (verbose through frame %llu) ===",
-        lvl, (unsigned long long)(fr + 300));
+        lvl, (unsigned long long)(fr + kVerboseFrames));
 }
 } // namespace ft
 #endif // Android

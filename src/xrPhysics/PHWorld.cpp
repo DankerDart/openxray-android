@@ -487,6 +487,15 @@ void CPHWorld::FrameStep(dReal step)
         m_frame_time = frame_time;
         return;
     }
+
+    // Clamp the catch-up. On a phone that renders at 3-5 fps a single frame can
+    // ask for ten or more substeps, and every one of them walks the whole
+    // object list five times -- a spiral where slow frames only make the next
+    // frame slower. Cap the count and let the simulation lag reality instead:
+    // physics runs in slow motion for a moment, but the frame rate can recover.
+    // The leftover is not carried over, so this cannot build up a backlog.
+    if (ph_console::ph_max_substeps > 0 && it_number > u32(ph_console::ph_max_substeps))
+        it_number = ph_console::ph_max_substeps;
 // for(UINT i=0;i<(m_reduce_delay+1);++i)
 #ifdef DEBUG
     debug_output().DBG_DrawFrameStart();

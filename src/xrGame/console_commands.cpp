@@ -2378,6 +2378,7 @@ void CCC_RegisterCommands()
 #ifdef DEBUG
     CMD1(CCC_PHGravity, "ph_gravity");
     CMD4(CCC_FloatBlock, "ph_timefactor", &phTimefactor, 0.000001f, 1000.f);
+    CMD4(CCC_Integer, "ph_max_substeps", &ph_console::ph_max_substeps, 1, 20);
     CMD4(CCC_FloatBlock, "ph_break_common_factor", &ph_console::phBreakCommonFactor, 0.f, 1000000000.f);
     CMD4(CCC_FloatBlock, "ph_rigid_break_weapon_factor", &ph_console::phRigidBreakWeaponFactor, 0.f, 1000000000.f);
     CMD4(CCC_Integer, "ph_tri_clear_disable_count", &ph_console::ph_tri_clear_disable_count, 0, 255);
@@ -2669,6 +2670,7 @@ void CCC_RegisterCommands()
     CMD3(CCC_String, "slot_3", g_quick_use_slots[3], 32);
 
     CMD4(CCC_Integer, "keypress_on_start", &g_keypress_on_start, 0, 1);
+    CMD4(CCC_Float, "script_budget", &ps_script_budget_ms, 0.1f, 16.f);
     CMD1(CCC_UI_Time_Factor, "ui_time_factor");
     CMD2(CCC_UI_Time_Dilation_Mode, "time_dilation_inventory", UITimeDilator::Inventory);
     CMD2(CCC_UI_Time_Dilation_Mode, "time_dilation_pda", UITimeDilator::Pda);

@@ -2,6 +2,19 @@
 
 #include "xrDebug.h"
 
+// glGetError() is a synchronous client->driver query: the driver has to
+// validate its command buffer before it can answer. On tiled mobile GPUs
+// (Mali, Adreno) that behaves like a miniature glFinish, and CHK_GL sits in
+// the per-object state path -- roughly a dozen calls per rendered object, i.e.
+// tens of thousands of round-trips per frame. That alone costs whole frames.
+//
+// Default to off and let the release build issue the call unchecked, which is
+// what the other CHK_* macros already do here. Turn it back on when chasing a
+// GL problem: -DXRAY_ENABLE_GL_ERROR_CHECK=1
+#ifndef XRAY_ENABLE_GL_ERROR_CHECK
+#   define XRAY_ENABLE_GL_ERROR_CHECK 0
+#endif
+
 #define DEBUG_INFO {__FILE__, __LINE__, __FUNCTION__}
 #define CHECK_OR_EXIT(expr, message)\
     do\
@@ -200,6 +213,7 @@
 #define VERIFY3(expr, desc, arg1) do {} while (false)
 #define VERIFY4(expr, desc, arg1, arg2) do {} while (false)
 #define CHK_DX(expr) expr
+#if XRAY_ENABLE_GL_ERROR_CHECK
 #define CHK_GL(expr)\
     do\
     {\
@@ -208,7 +222,26 @@
         if (glErr_ != GL_NO_ERROR)\
             Msg("! GL error 0x%X after: %s", glErr_, #expr);\
     } while (false)
+#else
+#define CHK_GL(expr) expr
+#endif // XRAY_ENABLE_GL_ERROR_CHECK
 #endif // DEBUG
+
+// Framebuffer completeness is a driver query too, and u_setrt()/set_pass_targets()
+// issue it on every render target switch -- ~25-35 times per frame. VERIFY()
+// discards the result outside debug builds, so in release the query bought
+// nothing and still stalled the pipeline. Keep it wherever assertions are live,
+// or when the GL error check is explicitly turned on.
+#if XRAY_ENABLE_GL_ERROR_CHECK || defined(DEBUG) || defined(_DEBUG)
+#define XR_GL_CHECK_FBO() \
+    do \
+    { \
+        [[maybe_unused]] GLenum status_ = glCheckFramebufferStatus(GL_FRAMEBUFFER); \
+        VERIFY(status_ == GL_FRAMEBUFFER_COMPLETE); \
+    } while (false)
+#else
+#define XR_GL_CHECK_FBO() do {} while (false)
+#endif // GL check
 
 #if XRAY_EXCEPTIONS
 #define THROW3(expr, msg0, msg1)\

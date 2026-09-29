@@ -19,6 +19,8 @@ add_compile_definitions(
     # Tracy profiler
     $<$<BOOL:${XRAY_ENABLE_TRACY}>:TRACY_ENABLE>
     $<$<BOOL:${XRAY_ENABLE_TRACY}>:TRACY_NO_FRAME_IMAGE>
+    # glGetError after every GL call -- see the comment in xrDebug_macros.h
+    $<$<BOOL:${XRAY_ENABLE_GL_ERROR_CHECK}>:XRAY_ENABLE_GL_ERROR_CHECK=1>
     # Luabind
     $<$<CONFIG:Release,ReleaseMasterGold>:LUABIND_NO_EXCEPTIONS>
     $<$<CONFIG:Release,ReleaseMasterGold>:LUABIND_NO_ERROR_CHECKING>

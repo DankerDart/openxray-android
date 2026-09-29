@@ -36,7 +36,16 @@ const xr_token qpreset_token[] =
     { nullptr, 0 }
 };
 
+// Three sun cascades at 2048 means ~12.6M shadow pixels per frame, an order of
+// magnitude more than the main colour buffer even at a reduced internal
+// resolution -- and every shadow-casting spot light pays a full map clear on top
+// of that. Mobile tile GPUs choke on it, so start at 1024 there; the
+// r2_smap_size cvar still overrides this.
+#if defined(XR_PLATFORM_ANDROID)
+u32 ps_r2_smapsize = 1024;
+#else
 u32 ps_r2_smapsize = 2048;
+#endif
 const xr_token qsmapsize_token[] =
 {
 #if !defined(MASTER_GOLD) || RENDER == R_R1
@@ -170,6 +179,12 @@ int ps_r1_SoftwareSkinning = 0; // r1-only
 // R2
 bool ps_r2_sun_static = false;
 bool ps_r2_advanced_pp = true; // advanced post process and effects
+// Route the final combine through rt_Color and always run phase_pp, even when no
+// post-process parameter is active. That is what the engine used to do
+// unconditionally ("HOLGER - HACK"); it costs an extra full-resolution render
+// target plus a full-resolution fullscreen pass, which mobile GPUs cannot
+// afford. Off by default, set r2_complex_pp 1 to restore the old behaviour.
+int ps_r2_complex_pp = 0;
 
 float ps_r2_ssaLOD_A = 64.f;
 float ps_r2_ssaLOD_B = 48.f;
@@ -891,6 +906,7 @@ void xrRender_initconsole()
 
     CMD4(CCC_Float, "r2_slight_fade", &ps_r2_slight_fade, .2f, 1.f);
     CMD3(CCC_Token, "r2_smap_size", &ps_r2_smapsize, qsmapsize_token);
+    CMD4(CCC_Integer, "r2_complex_pp", &ps_r2_complex_pp, 0, 1);
 
     Fvector tw_min, tw_max;
     tw_min.set(0, 0, 0);

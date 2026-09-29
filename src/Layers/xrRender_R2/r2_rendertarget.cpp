@@ -360,8 +360,7 @@ CRenderTarget::CRenderTarget()
         }
 
         // We only need to create rt_smap_surf on DX9, on DX10+ it's always a NULL render target
-        // TODO: OGL: Don't create a color buffer for the shadow map.
-#if defined(USE_OGL)
+#if !defined(USE_OGL)
         rt_smap_surf.create(r2_RT_smap_surf, smapsize, smapsize, surf_format);
 #endif
 

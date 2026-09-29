@@ -2,11 +2,20 @@
 
 namespace xray::render::RENDER_NAMESPACE
 {
+// See r3_rendertarget_phase_smap_D.cpp: on GL the shadow maps are depth-only, so
+// the 2048x2048 RGBA8 rt_smap_surf is not attached. A tsh fill writes into that
+// color target, and tsh is a DX-era path that is off unless -tsh is passed.
+#if defined(USE_OGL)
+#   define OXR_SMAP_COLOR_ATTACHMENT nullptr
+#else
+#   define OXR_SMAP_COLOR_ATTACHMENT rt_smap_surf
+#endif
+
 void CRenderTarget::phase_smap_spot_clear(CBackend& cmd_list)
 {
     rt_smap_depth->set_slice_write(cmd_list.context_id, 0);
     cmd_list.set_pass_targets(
-        rt_smap_surf,
+        OXR_SMAP_COLOR_ATTACHMENT,
         nullptr,
         nullptr,
         rt_smap_depth
@@ -23,7 +32,7 @@ void CRenderTarget::phase_smap_spot(CBackend& cmd_list, light* L)
     rt_smap_depth->set_slice_write(cmd_list.context_id, 0); // TODO: it is possible to increase lights batch size
                                                             // by rendering into different smap array slices in parallel
     cmd_list.set_pass_targets(
-        rt_smap_surf,
+        OXR_SMAP_COLOR_ATTACHMENT,
         nullptr,
         nullptr,
         rt_smap_depth
@@ -45,6 +54,11 @@ void CRenderTarget::phase_smap_spot_tsh(CBackend& cmd_list, light* L)
     VERIFY(!"Implement clear of the buffer for tsh!");
     VERIFY(RImplementation.o.Tshadows);
     cmd_list.set_ColorWriteEnable();
+#if defined(USE_OGL)
+    // Depth-only shadow FBO on GL: there is no color target for the tsh fill to
+    // rasterize into. tsh is unimplemented on this backend anyway (see the
+    // VERIFY above) and stays off unless -tsh is passed.
+#else
     if (IRender_Light::OMNIPART == L->flags.type)
     {
         // omni-part
@@ -98,5 +112,7 @@ void CRenderTarget::phase_smap_spot_tsh(CBackend& cmd_list, light* L)
         // draw
         cmd_list.Render(D3DPT_TRIANGLELIST, Offset, 0, 4, 0, 2);
     }
+#endif // USE_OGL
 }
 } // namespace xray::render::RENDER_NAMESPACE
+#undef OXR_SMAP_COLOR_ATTACHMENT
