@@ -11,6 +11,102 @@
 #include <getopt.h>
 #endif
 
+#if defined(XR_PLATFORM_ANDROID)
+#include <android/log.h>
+#include <csignal>
+#include <cstdint>
+#include <cstring>
+#include <dlfcn.h>
+#include <unwind.h>
+
+namespace
+{
+struct backtrace_state
+{
+    void** frames;
+    int count;
+    int capacity;
+};
+
+// The NDK ships no execinfo.h, so walk the stack through the compiler's unwind
+// tables (clang always provides libunwind) and resolve the PCs with dladdr.
+_Unwind_Reason_Code UnwindCallback(struct _Unwind_Context* context, void* arg)
+{
+    auto* state = static_cast<backtrace_state*>(arg);
+    if (state->count < state->capacity)
+    {
+        const uintptr_t pc = _Unwind_GetIP(context);
+        if (pc != 0)
+            state->frames[state->count++] = reinterpret_cast<void*>(pc);
+    }
+    return _URC_NO_REASON;
+}
+
+// R_ASSERT aborts and bad pointers fault inside the engine, where nothing reaches
+// the Java UncaughtExceptionHandler, so the only trace is whatever logcat has.
+// Dump the signal and a backtrace before letting the default handler terminate
+// the process, otherwise the system still writes a tombstone but we lose it.
+void AndroidCrashHandler(int signal_number, siginfo_t* info, void*)
+{
+    char line[1024];
+
+    snprintf(line, sizeof(line), "\n*** OpenXRay NATIVE CRASH: signal %d (%s), si_code %d, si_addr %p, pid %d ***",
+        signal_number, strsignal(signal_number), info ? info->si_code : 0,
+        info ? info->si_addr : nullptr, getpid());
+    __android_log_write(ANDROID_LOG_FATAL, "OpenXRay", line);
+
+    void* frames[64];
+    backtrace_state state{frames, 0, 64};
+    _Unwind_Backtrace(UnwindCallback, &state);
+
+    for (int i = 0; i < state.count; ++i)
+    {
+        Dl_info dl_info;
+        const char* symbol = "??";
+        const char* object = "??";
+        if (dladdr(frames[i], &dl_info) != 0)
+        {
+            if (dl_info.dli_sname)
+                symbol = dl_info.dli_sname;
+            if (dl_info.dli_fname)
+                object = dl_info.dli_fname;
+        }
+        snprintf(line, sizeof(line), "    #%02d %p %s (%s)", i, frames[i], symbol, object);
+        __android_log_write(ANDROID_LOG_FATAL, "OpenXRay", line);
+    }
+
+    // Restore the default disposition and re-raise, so the process still dies the
+    // way the platform expects (and produces its own tombstone).
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    sigemptyset(&action.sa_mask);
+    action.sa_handler = SIG_DFL;
+    sigaction(signal_number, &action, nullptr);
+    raise(signal_number);
+}
+
+void InstallCrashHandlers()
+{
+    // Stack overflow cannot be reported from the overflowed stack.
+    static char alt_stack[SIGSTKSZ > 65536 ? SIGSTKSZ : 65536];
+    stack_t ss;
+    ss.ss_sp = alt_stack;
+    ss.ss_size = sizeof(alt_stack);
+    ss.ss_flags = 0;
+    sigaltstack(&ss, nullptr);
+
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    action.sa_sigaction = AndroidCrashHandler;
+
+    for (const int sig : {SIGSEGV, SIGBUS, SIGFPE, SIGILL, SIGABRT})
+        sigaction(sig, &action, nullptr);
+}
+} // namespace
+#endif
+
 #if defined(XR_PLATFORM_APPLE)
 #include <SDL.h>
 
@@ -130,6 +226,10 @@ int main(int argc, char *argv[])
 #endif
 {
     int result = EXIT_FAILURE;
+
+#if defined(XR_PLATFORM_ANDROID)
+    InstallCrashHandlers();
+#endif
 
     try
     {

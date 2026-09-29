@@ -145,3 +145,14 @@ doc/doxygen/latex/*
 oldsrc/
 backup/
 scratch/
+
+# ------------------------------------------------------------------------------
+# Third-party checkouts fetched by scripts/build_angle.sh (ANGLE, depot_tools).
+# The build products land in android/app/src/main/jniLibs/<abi>/ (ignored above).
+# ------------------------------------------------------------------------------
+third_party/
+
+# ------------------------------------------------------------------------------
+# Local packaging artifacts (bundles of the tracked res/*/gamedata trees).
+# ------------------------------------------------------------------------------
+res/*/gamedata.zip

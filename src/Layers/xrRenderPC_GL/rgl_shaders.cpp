@@ -308,6 +308,10 @@ HRESULT CRender::shader_compile(pcstr name, IReader* fs, pcstr pFunctionName,
         options.add("#version 310 es");
     else
         options.add("#version 300 es");
+    // Must precede every non-preprocessor token (including the precision
+    // statements below), so it goes right after #version.
+    if (HW.ClipCullDistanceSupported)
+        options.add("#extension GL_EXT_clip_cull_distance : require");
     options.add("precision highp float;");
     options.add("precision highp int;");
     options.add("precision lowp sampler2D;");
@@ -357,6 +361,11 @@ HRESULT CRender::shader_compile(pcstr name, IReader* fs, pcstr pFunctionName,
 
     // Branching
     appendShaderOption(HW.Caps.raster_major >= 3, "USE_BRANCHING", "1");
+
+    // Hardware gl_ClipDistance for the volumetric light bounds. Desktop GL has it
+    // in core, GLES needs GL_EXT_clip_cull_distance. When it is missing the
+    // volumetric shaders clip in the fragment shader instead.
+    appendShaderOption(HW.ClipCullDistanceSupported, "USE_CLIP_DISTANCE", "1");
 
     // Vertex texture fetch
     appendShaderOption(HW.Caps.geometry.bVTF, "USE_VTF", "1");
@@ -581,6 +590,11 @@ HRESULT CRender::shader_compile(pcstr name, IReader* fs, pcstr pFunctionName,
     }
     else
     {
+        // Must stay defined: sload.h, common_functions.h and ssao_hdao_new.ps use
+        // "#if MSAA_SAMPLES == 2", and GLSL ES rejects an undefined identifier in
+        // a preprocessor expression (desktop GLSL just treats it as 0).
+        options.add("MSAA_SAMPLES", "1");
+
         sh_name.append(static_cast<u32>(0)); // MSAA off
         sh_name.append(static_cast<u32>(0)); // No MSAA samples
         sh_name.append(static_cast<u32>(0)); // No MSAA ISAMPLE
@@ -589,6 +603,11 @@ HRESULT CRender::shader_compile(pcstr name, IReader* fs, pcstr pFunctionName,
         sh_name.append(static_cast<u32>(0)); // DX10_1_ATOC   off
         sh_name.append(static_cast<u32>(0)); // DX10_1_NATIVE off
     }
+
+    // Same reasoning as MSAA_SAMPLES above: fxaa.ps tests these in #if but only
+    // self-defines FXAA_HLSL_3, so the other two have to come from here.
+    options.add("FXAA_360", "0");
+    options.add("FXAA_PS3", "0");
 
     // finish
     options.finish();

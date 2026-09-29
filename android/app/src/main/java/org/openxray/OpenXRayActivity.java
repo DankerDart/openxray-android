@@ -121,6 +121,9 @@ public class OpenXRayActivity extends SDLActivity {
         return new String[] {
             "-soc",
             "-rgl",
+            // There is no logo.bmp next to fsgame.ltx on Android, so ShowSplash()
+            // would only log "Couldn't create surface from image" and exit again.
+            "-nosplash",
             "-force_flushlog"
         };
     }

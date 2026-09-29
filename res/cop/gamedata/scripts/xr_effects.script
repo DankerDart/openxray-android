@@ -2367,7 +2367,7 @@ end
 -- ������� ������� ���������� �������� ���� � ������. by peacemaker, hein, redstain
 function reset_sound_npc(actor, npc, p)
 	local obj_id = npc:id()
-	if obj_id and xr_sound.sound_table and xr_sound.sound_table[obj_id] then
+	if obj_id and xr_sound and xr_sound.sound_table and xr_sound.sound_table[obj_id] then
 		xr_sound.sound_table[obj_id]:reset(obj_id)
 	end
 end

@@ -9,8 +9,9 @@ void draw_rect(Fvector2 LTp, Fvector2 RBp, Fvector2 LTt, Fvector2 RBt, u32 clr, 
 
 CUIFrameWindow::CUIFrameWindow(pcstr window_name)
     : CUIWindow(window_name),
+      m_texture_color(color_argb(255, 255, 255, 255)),
       m_bTextureVisible(false),
-      m_texture_color(color_argb(255, 255, 255, 255)) {}
+      m_bSmallRectReported(false) {}
 
 void CUIFrameWindow::SetWndSize(const Fvector2& sz)
 {
@@ -22,7 +23,9 @@ void CUIFrameWindow::SetWndSize(const Fvector2& sz)
     { // fit to min size
         Fvector2 min_size;
         min_size.x = m_tex_rect[fmLT].width() + m_tex_rect[fmRT].width();
-        min_size.y = m_tex_rect[fmLT].height() + m_tex_rect[fmLB].height();
+        // DrawElements() spans the window with LT+RB, so the fit has to cover the bigger
+        // bottom corner, otherwise the frame does not fit even after this call.
+        min_size.y = m_tex_rect[fmLT].height() + _max(m_tex_rect[fmLB].height(), m_tex_rect[fmRB].height());
 
         if (size_test.x < min_size.x)
         {
@@ -151,6 +154,16 @@ bool CUIFrameWindow::InitTextureEx(pcstr texture, pcstr shader, bool fatal /*= t
     }
 
     m_bTextureVisible = !failed;
+
+    if (m_bTextureVisible)
+    {
+        // The window can be sized before InitTexture() (SetWndSize() cannot fit the minimum
+        // size while the textures are unknown), so apply the fit now that it is known.
+        const Fvector2 size = GetWndSize();
+        if (size.x > EPS_L && size.y > EPS_L)
+            SetWndSize(size);
+    }
+
     return !failed;
 }
 
@@ -195,19 +208,51 @@ void CUIFrameWindow::DrawElements()
     u32 rect_count = 4; // lt+rt+lb+rb
     back_len.x = rect.width() - m_tex_rect[fmLT].width() - m_tex_rect[fmRT].width();
     back_len.y = rect.height() - m_tex_rect[fmLT].height() - m_tex_rect[fmRB].height();
-    R_ASSERT(back_len.x + EPS_L >= 0.0f && back_len.y + EPS_L >= 0.0f);
+
+    if (rect.width() <= EPS_L || rect.height() <= EPS_L)
+        return;
+
+    if (back_len.x < -EPS_L || back_len.y < -EPS_L)
+    {
+        // The window is smaller than the pair of corner textures. This happens when the
+        // window is sized before InitTexture() (SetWndSize() cannot fit the minimum size
+        // before the textures are known) or when the texture rects come from an atlas that
+        // is larger than the UI base resolution. get_points() already crops the corners
+        // that do not fit, so clamp the values instead of aborting the game.
+        if (!m_bSmallRectReported)
+        {
+            m_bSmallRectReported = true;
+            Msg("! %s: window %f x %f is smaller than the frame corners (%f x %f)",
+                WindowName().c_str(), rect.width(), rect.height(),
+                m_tex_rect[fmLT].width() + m_tex_rect[fmRT].width(),
+                m_tex_rect[fmLT].height() + m_tex_rect[fmRB].height());
+        }
+        back_len.x = _max(back_len.x, 0.0f);
+        back_len.y = _max(back_len.y, 0.0f);
+    }
+
+    // Zero-sized part textures would cause a division by zero in the primitive counter and
+    // an endless loop in the tiling helpers, so treat them as "not present".
+    const float tile_w = m_tex_rect[fmT].width();
+    const float tile_h = m_tex_rect[fmL].height();
+    const float back_w = m_tex_rect[fmBK].width();
+    const float back_h = m_tex_rect[fmBK].height();
+
+    const bool has_tiles_x = back_len.x > 0.0f && tile_w > EPS_L; // top+bottom
+    const bool has_tiles_y = back_len.y > 0.0f && tile_h > EPS_L; // left+right
+    const bool has_back = has_tiles_x && has_tiles_y && back_w > EPS_L && back_h > EPS_L;
 
     u32 cnt = 0;
-    if (back_len.x > 0.0f) // top+bottom
-        cnt = 2 * iCeil(back_len.x / m_tex_rect[fmT].width());
+    if (has_tiles_x)
+        cnt = 2 * iCeil(back_len.x / tile_w);
     rect_count += cnt;
 
-    if (back_len.y > 0.0f) // left+right
-        cnt = 2 * iCeil(back_len.y / m_tex_rect[fmL].height());
+    if (has_tiles_y)
+        cnt = 2 * iCeil(back_len.y / tile_h);
     rect_count += cnt;
 
-    if (back_len.x > 0.0f && back_len.y > 0.0f) // back
-        cnt = iCeil(back_len.x / m_tex_rect[fmBK].width()) * iCeil(back_len.y / m_tex_rect[fmBK].height());
+    if (has_back)
+        cnt = iCeil(back_len.x / back_w) * iCeil(back_len.y / back_h);
 
     rect_count += cnt;
 
@@ -238,7 +283,7 @@ void CUIFrameWindow::DrawElements()
     get_points(tmp, fmRB, LTp, RBp, LTt, RBt);
     draw_rect(LTp, RBp, LTt, RBt, m_texture_color, ts);
 
-    if (back_len.x > 0.0f)
+    if (has_tiles_x)
     {
         tmp.lt = rect.lt;
         tmp.lt.x += m_tex_rect[fmLT].width();
@@ -253,7 +298,7 @@ void CUIFrameWindow::DrawElements()
         draw_tile_line(tmp, fmB, true, ts);
     }
 
-    if (back_len.y > 0.0f)
+    if (has_tiles_y)
     {
         tmp.lt = rect.lt;
         tmp.lt.y += m_tex_rect[fmLT].height();
@@ -269,7 +314,7 @@ void CUIFrameWindow::DrawElements()
         draw_tile_line(tmp, fmR, false, ts);
     }
 
-    if (back_len.x > 0.0f && back_len.y > 0.0f)
+    if (has_back)
     {
         tmp.lt.x = rect.lt.x + m_tex_rect[fmLT].width();
         tmp.lt.y = rect.lt.y + m_tex_rect[fmLT].height();
@@ -312,6 +357,11 @@ void CUIFrameWindow::draw_tile_line(Frect rect, int i, bool b_horz, Fvector2 con
     Fvector2 LTt, RBt;
     Fvector2 LTp, RBp;
 
+    // A zero-sized part would never advance the loop.
+    const float step = b_horz ? m_tex_rect[i].width() : m_tex_rect[i].height();
+    if (step <= EPS_L)
+        return;
+
     if (b_horz)
     {
         while (rect.lt.x + EPS_L < rect.rb.x)
@@ -334,6 +384,9 @@ void CUIFrameWindow::draw_tile_line(Frect rect, int i, bool b_horz, Fvector2 con
 
 void CUIFrameWindow::draw_tile_rect(Frect rect, int i, Fvector2 const& ts)
 {
+    if (m_tex_rect[i].width() <= EPS_L)
+        return;
+
     Frect tmp = rect;
     while (rect.lt.x + EPS_L < rect.rb.x)
     {

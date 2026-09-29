@@ -10,7 +10,11 @@
 #define	JITTER_SUN_SHAFTS
 
 #ifdef	SUN_SHAFTS_QUALITY
-	#if SUN_SHAFTS_QUALITY==1
+	#if SUN_SHAFTS_QUALITY==0
+		//	Quality 0 is always defined by the renderer even when sun shafts are off, but it
+		//	selects none of the RAY_SAMPLES counts below.
+		#define	SUN_SHAFTS_OFF
+	#elif SUN_SHAFTS_QUALITY==1
 		#define	FILTER_LOW
 		#define RAY_SAMPLES	20
 	#elif SUN_SHAFTS_QUALITY==2
@@ -53,7 +57,7 @@ float4 	_main (v2p_volume  I)
 	
 	gbuffer_data gbd = gbuffer_load_data( GLD_P(tc, pos2d, ISAMPLE) );
 
-#ifndef	SUN_SHAFTS_QUALITY
+#if defined(SUN_SHAFTS_OFF) || !defined(SUN_SHAFTS_QUALITY)
 	return float4(0,0,0,0);
 #else	//	SUN_SHAFTS_QUALITY
 

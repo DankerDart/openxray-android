@@ -25,6 +25,10 @@
 
 #include <SDL.h>
 
+// Internal resolution scale: multiplies the window size to get the actual render
+// resolution (Device.dwWidth/dwHeight). 1.0 = native. See device.cpp.
+extern ENGINE_API float ps_render_scale;
+
 // refs
 class Task;
 
@@ -58,7 +62,8 @@ public:
     u32 dwPrecacheFrame{};
     u32 dwPrecacheTotal{};
 
-    // Rendering resolution
+    // Rendering resolution (may be smaller than the window when internal
+    // resolution scaling is active; psDeviceMode keeps the real window size).
     u32 dwWidth{};
     u32 dwHeight{};
 

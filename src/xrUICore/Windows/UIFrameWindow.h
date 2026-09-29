@@ -48,6 +48,7 @@ protected:
     Frect m_tex_rect[fmMax];
     u32 m_texture_color;
     bool m_bTextureVisible;
+    bool m_bSmallRectReported;
 
     CUIStatic* m_title_text{};
 
