@@ -26,10 +26,456 @@ string512 g_sBenchmarkName;
 int ps_fps_limit = 501;
 int ps_fps_limit_in_menu = 60;
 
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+// Internal resolution scale. 1.0 = native window resolution. Lowering it shrinks
+// every offscreen render target (R2 allocates them from Device.dwWidth/dwHeight),
+// which is the single biggest fill-rate win on mobile GPUs. The UI scales itself
+// from dwWidth/dwHeight (UICore::OnDeviceReset) and Present() upscales on blit,
+// so gameplay and menus stay laid out correctly.
+float ps_render_scale = 0.6f;
+#else
+float ps_render_scale = 1.0f;
+#endif
+
 bool g_bLoaded = false;
 ref_light precache_light = 0;
 
 using namespace xray;
+
+// ---------------------------------------------------------------------------
+// Frame stall watchdog + per-phase frame tracing (Android debug builds).
+// Goal: when a frame never finishes (the post-eStart freeze on Mali), dump the
+// main thread's stack at the exact stall point instead of guessing.
+// ---------------------------------------------------------------------------
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+#include <atomic>
+#include <cstdarg>
+#include <cstdio>
+#include <cstring>
+#include <pthread.h>
+#include <signal.h>
+#include <unistd.h>
+#include <time.h>
+#include <dlfcn.h>
+#include <android/log.h>
+#include <unwind.h>
+#include <dirent.h>
+#include <stdlib.h>
+
+#include "frame_trace.h"
+
+namespace ft
+{
+enum Phase
+{
+    PH_FRAME_START = 0,
+    PH_BEFORE_FRAME,
+    PH_FRAME_MOVE,   // game update / scripts / physics
+    PH_CAMERA,
+    PH_PARALLEL,     // worker thread
+    PH_RENDER_BEGIN, // first GL touch
+    PH_SEQ_RENDER,   // draw calls / shader compiles
+    PH_IMGUI,
+    PH_RENDER_END,   // Present / swap: blocks if GPU is stuck
+    PH_TASK_WAIT,
+    PH_SLEEP,
+    PH_FRAME_END,
+    PH_MAIN_LOOP_PRE,    // CApplication loop top, before ProcessFrame
+    PH_MAIN_LOOP_EVENTS,  // SDL_PeepEvents / ProcessEvent
+    PH_MAIN_LOOP_ACTIVATE,// OnWindowActivate
+    PH_MAIN_LOOP_POST,    // right after ProcessFrame returned
+    PH_DEVICE_RESET,      // CRenderDevice::Reset (GL teardown/rebuild)
+    PH_COUNT
+};
+
+inline const char* phase_name(int p)
+{
+    static const char* names[PH_COUNT] = {
+        "FRAME_START", "BEFORE_FRAME", "FRAME_MOVE(update/scripts)", "CAMERA", "PARALLEL",
+        "RENDER_BEGIN", "SEQ_RENDER(draw/shaders)", "IMGUI", "RENDER_END(present/swap)",
+        "TASK_WAIT", "SLEEP", "FRAME_END",
+        "MAIN_LOOP_PRE", "MAIN_LOOP_EVENTS", "MAIN_LOOP_ACTIVATE", "MAIN_LOOP_POST",
+        "DEVICE_RESET"};
+    return (p >= 0 && p < PH_COUNT) ? names[p] : "?";
+}
+
+constexpr const char* TAG = "OpenXRayFT";
+
+std::atomic<int>      g_phase{PH_FRAME_START};
+std::atomic<uint64_t> g_frame{0};
+std::atomic<uint64_t> g_hb{0};
+std::atomic<uint64_t> g_verbose_until{300};
+std::atomic<bool>     g_installed{false};
+
+pthread_t g_frame_thread;
+std::atomic<int> g_probe_pending{0};
+
+// rolling window of checkpoint tags leading to the current phase
+constexpr int kTrail = 28;
+char g_trail[kTrail][44];
+std::atomic<int> g_trail_n{0};
+pthread_mutex_t g_trail_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+inline bool verbose() { return g_frame.load(std::memory_order_relaxed) <= g_verbose_until.load(std::memory_order_relaxed); }
+inline void bump() { g_hb.fetch_add(1, std::memory_order_relaxed); }
+
+void note(const char* tag)
+{
+    const int idx = g_trail_n.fetch_add(1, std::memory_order_relaxed) % kTrail;
+    pthread_mutex_lock(&g_trail_mtx);
+    snprintf(g_trail[idx], sizeof(g_trail[idx]), "%s", tag);
+    pthread_mutex_unlock(&g_trail_mtx);
+    bump();
+}
+
+inline void set_phase(int p) { g_phase.store(p, std::memory_order_relaxed); bump(); }
+
+// ---- file sink: <game folder>/frame_trace.log ----
+// The engine chdir()s into the game folder during init (LocatorAPI.cpp), so the
+// CWD is exactly the folder the user can browse -> drop the trace there.
+FILE* g_ftf = nullptr;
+pthread_mutex_t g_ftf_mtx = PTHREAD_MUTEX_INITIALIZER;
+char g_ftf_path[1024] = { 0 };
+
+void emit_to_file(const char* buf)
+{
+    char stamp[32] = { 0 };
+    timespec ts{};
+    clock_gettime(CLOCK_REALTIME, &ts);
+    tm t{};
+    localtime_r(&ts.tv_sec, &t);
+    snprintf(stamp, sizeof(stamp), "%02d:%02d:%02d.%03d | ",
+        t.tm_hour, t.tm_min, t.tm_sec, (int)(ts.tv_nsec / 1000000));
+
+    pthread_mutex_lock(&g_ftf_mtx);
+    if (g_ftf)
+    {
+        fputs(stamp, g_ftf);
+        fputs(buf, g_ftf);
+        fputc('\n', g_ftf);
+        fflush(g_ftf);
+    }
+    pthread_mutex_unlock(&g_ftf_mtx);
+}
+
+void vlog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+void vlog(const char* fmt, ...)
+{
+    if (!verbose())
+        return;
+    char buf[768];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    __android_log_write(ANDROID_LOG_INFO, TAG, buf);
+    emit_to_file(buf);
+}
+
+void alog(const char* fmt, ...) __attribute__((format(printf, 1, 2)));
+void alog(const char* fmt, ...)
+{
+    char buf[768];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, ap);
+    va_end(ap);
+    __android_log_write(ANDROID_LOG_ERROR, TAG, buf);
+    emit_to_file(buf);
+}
+
+// --- backtrace captured on the frame thread inside the probe handler ---
+constexpr int kBt = 48;
+void* g_bt[kBt];
+int g_bt_n = 0;
+
+struct BtState
+{
+    void** f;
+    int* n;
+    int cap;
+};
+_Unwind_Reason_Code bt_cb(struct _Unwind_Context* c, void* arg)
+{
+    auto* s = static_cast<BtState*>(arg);
+    if (*s->n < s->cap)
+    {
+        const uintptr_t pc = _Unwind_GetIP(c);
+        if (pc)
+            s->f[(*s->n)++] = reinterpret_cast<void*>(pc);
+    }
+    return _URC_NO_REASON;
+}
+
+void on_probe(int, siginfo_t*, void*)
+{
+    g_bt_n = 0;
+    BtState st{g_bt, &g_bt_n, kBt};
+    _Unwind_Backtrace(bt_cb, &st);
+    g_probe_pending.store(0, std::memory_order_release);
+}
+
+void dump_backtrace(const char* why)
+{
+    alog("\n*** OpenXRay STALL BACKTRACE *** (%s)", why);
+    for (int i = 0; i < g_bt_n; ++i)
+    {
+        Dl_info di;
+        const char* sym = "??";
+        const char* obj = "??";
+        if (dladdr(g_bt[i], &di) != 0)
+        {
+            if (di.dli_sname)
+                sym = di.dli_sname;
+            if (di.dli_fname)
+                obj = di.dli_fname;
+        }
+        alog("    #%02d %p %s (%s)", i, g_bt[i], sym, obj);
+    }
+    int n = g_trail_n.load(std::memory_order_relaxed);
+    if (n > kTrail)
+        n = kTrail;
+    alog("    --- checkpoint trail (oldest->newest) ---");
+    pthread_mutex_lock(&g_trail_mtx);
+    for (int i = 0; i < n; ++i)
+        alog("    . %s", g_trail[i]);
+    pthread_mutex_unlock(&g_trail_mtx);
+}
+
+// ---------------------------------------------------------------------------
+// /proc inspection: the only reliable way to tell "blocked in a driver ioctl"
+// (D state) from "sleeping on a lock/futex" (S state) on Android.
+// ---------------------------------------------------------------------------
+bool read_proc(const char* path, char* out, size_t cap)
+{
+    out[0] = 0;
+    FILE* f = fopen(path, "r");
+    if (!f)
+        return false;
+    if (fgets(out, (int)cap, f) == nullptr)
+        out[0] = 0;
+    fclose(f);
+    size_t n = strlen(out);
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r'))
+        out[--n] = 0;
+    return out[0] != 0;
+}
+
+// 'R' runnable, 'S' interruptible sleep, 'D' uninterruptible sleep (driver ioctl)
+char thread_state(pid_t tid, char* stat_out, size_t cap)
+{
+    char path[128];
+    snprintf(path, sizeof(path), "/proc/self/task/%d/stat", (int)tid);
+    if (!read_proc(path, stat_out, cap))
+        return '?';
+    // "pid (comm) state ..." -- comm may contain spaces/parens, so scan from the back
+    char* p = strrchr(stat_out, ')');
+    if (!p)
+        return '?';
+    for (++p; *p == ' '; ++p)
+        ;
+    return *p;
+}
+
+// aarch64 syscall numbers that actually matter for a frame stall
+const char* syscall_name(long nr)
+{
+    switch (nr)
+    {
+    case 7:   return "poll";
+    case 19:  return "eventfd2";
+    case 22:  return "timerfd_create";
+    case 25:  return "fcntl";
+    case 29:  return "ioctl";
+    case 43:  return "statfs";
+    case 56:  return "openat";
+    case 57:  return "close";
+    case 61:  return "getdents64";
+    case 63:  return "read";
+    case 64:  return "write";
+    case 66:  return "writev";
+    case 73:  return "ppoll";
+    case 94:  return "ftruncate";
+    case 98:  return "futex";
+    case 101: return "nanosleep";
+    case 115: return "clock_nanosleep";
+    case 124: return "sched_yield";
+    case 143: return "flock";
+    case 160: return "setrlimit";
+    case 167: return "prctl";
+    case 203: return "mlock";
+    case 215: return "munmap";
+    case 222: return "mmap";
+    case 232: return "epoll_wait";
+    case 233: return "madvise";
+    case 275: return "splice";
+    case 286: return "inotify_add_watch";
+    case 294: return "inotify_init1";
+    default:  return "?";
+    }
+}
+
+void log_proc(const char* label, pid_t tid)
+{
+    char path[128], buf[2048], stat[2048], comm[128];
+    const char st = thread_state(tid, stat, sizeof(stat));
+    alog("    [%s tid=%d] state=%c", label, (int)tid, st);
+
+    snprintf(path, sizeof(path), "/proc/self/task/%d/comm", (int)tid);
+    if (read_proc(path, comm, sizeof(comm)))
+        alog("        comm    = %s", comm);
+
+    snprintf(path, sizeof(path), "/proc/self/task/%d/wchan", (int)tid);
+    alog("        wchan   = %s", read_proc(path, buf, sizeof(buf)) ? buf : "<unavailable>");
+
+    snprintf(path, sizeof(path), "/proc/self/task/%d/syscall", (int)tid);
+    if (read_proc(path, buf, sizeof(buf)))
+    {
+        long nr = 0;
+        const int got = sscanf(buf, "%ld", &nr);
+        alog("        syscall = %s", got == 1 ? syscall_name(nr) : "?");
+        alog("        raw     = %s", buf); // nr arg0..arg5 sp pc
+    }
+    else
+        alog("        syscall = <unavailable>");
+
+    snprintf(path, sizeof(path), "/proc/self/task/%d/stack", (int)tid);
+    alog("        stack   = %s", read_proc(path, buf, sizeof(buf)) ? buf : "<needs root>");
+
+    alog("        stat    = %s", stat);
+}
+
+void dump_all_threads()
+{
+    alog("    --- all threads: tid state comm wchan ---");
+    DIR* d = opendir("/proc/self/task");
+    if (!d)
+    {
+        alog("    <opendir /proc/self/task failed>");
+        return;
+    }
+    struct dirent* e;
+    while ((e = readdir(d)) != nullptr)
+    {
+        if (e->d_name[0] == '.')
+            continue;
+        const pid_t tid = (pid_t)atoi(e->d_name);
+        char stat[2048], comm[128], wchan[256];
+        const char st = thread_state(tid, stat, sizeof(stat));
+        snprintf(comm, sizeof(comm), "/proc/self/task/%d/comm", (int)tid);
+        snprintf(wchan, sizeof(wchan), "/proc/self/task/%d/wchan", (int)tid);
+        char comm_buf[128] = "?", wchan_buf[256] = "?";
+        read_proc(comm, comm_buf, sizeof(comm_buf));
+        read_proc(wchan, wchan_buf, sizeof(wchan_buf));
+        alog("      tid=%-6d %c %-18s %s", (int)tid, st, comm_buf, wchan_buf);
+    }
+    closedir(d);
+}
+
+// hooks used by x_ray.cpp / Device_destroy.cpp
+void mainloop_mark(int slot, const char* tag)
+{
+    set_phase(PH_MAIN_LOOP_PRE + slot);
+    note(tag);
+    vlog("[ft] main loop | %s", tag);
+}
+
+void reset_mark(const char* tag)
+{
+    set_phase(PH_DEVICE_RESET);
+    note(tag);
+    vlog("[ft] device reset | %s", tag);
+}
+
+void* watchdog_main(void*)
+{
+    pthread_setname_np(pthread_self(), "xr_watchdog");
+    uint64_t last_hb = 0;
+    int stalled = 0;
+    int heavy_dumps = 0;
+    const timespec ts{1, 0};
+    for (;;)
+    {
+        nanosleep(&ts, nullptr);
+        const uint64_t hb = g_hb.load(std::memory_order_relaxed);
+        if (hb != last_hb)
+        {
+            last_hb = hb;
+            stalled = 0;
+            continue;
+        }
+        if (++stalled < 12) // ~12 s with zero progress anywhere
+            continue;
+        const int ph = g_phase.load(std::memory_order_relaxed);
+        const uint64_t fr = g_frame.load(std::memory_order_relaxed);
+        char why[256];
+        snprintf(why, sizeof(why), "no frame progress ~%ds; phase=%s; frames_done=%llu; probing...",
+            stalled, phase_name(ph), (unsigned long long)fr);
+        alog("*** OpenXRay STALL: %s", why);
+
+        // Kernel-side state first: works even when the thread cannot run userspace
+        // code at all, so it survives a hard D-state driver hang.
+        if (heavy_dumps == 0 || stalled % 30 == 0)
+        {
+            ++heavy_dumps;
+            log_proc("FRAME THREAD", (pid_t)g_frame_thread);
+            dump_all_threads();
+        }
+
+        g_probe_pending.store(1, std::memory_order_release);
+        pthread_kill(g_frame_thread, SIGUSR2);
+        // give the handler a moment if the frame thread is in an interruptible block
+        for (int i = 0; i < 50 && g_probe_pending.load(std::memory_order_acquire); ++i)
+            usleep(2000);
+        if (g_bt_n > 0)
+            dump_backtrace(why);
+        else
+            alog("*** OpenXRay STALL: SIGUSR2 was not delivered within 100 ms -> the frame thread "
+                 "is NOT in userspace (kernel wait / uninterruptible). See the /proc dump above. ***");
+    }
+    return nullptr;
+}
+
+void install()
+{
+    if (g_installed.exchange(true))
+        return;
+    g_frame_thread = pthread_self();
+
+    // Open the trace log in the game folder (engine chdir'ed there at init).
+    char cwd[900];
+    if (getcwd(cwd, sizeof(cwd)) != nullptr)
+    {
+        snprintf(g_ftf_path, sizeof(g_ftf_path), "%s/frame_trace.log", cwd);
+        g_ftf = fopen(g_ftf_path, "w");
+    }
+
+    struct sigaction sa;
+    memset(&sa, 0, sizeof(sa));
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK | SA_RESTART;
+    sa.sa_sigaction = on_probe;
+    sigaction(SIGUSR2, &sa, nullptr);
+    pthread_t th;
+    if (pthread_create(&th, nullptr, watchdog_main, nullptr) == 0)
+        pthread_detach(th);
+    alog("[ft] watchdog installed on tid %u", (unsigned)gettid());
+    alog("[ft] frame trace log file: %s (%s)", g_ftf_path[0] ? g_ftf_path : "<unavailable>",
+        g_ftf ? "opened" : "FAILED to open");
+    Msg("[ft] frame trace log: %s", g_ftf_path[0] ? g_ftf_path : "<unavailable>");
+}
+
+// called once when a fresh level becomes current -> extend verbose window
+void level_changed(IGame_Level* lvl)
+{
+    const uint64_t fr = g_frame.load(std::memory_order_relaxed);
+    g_verbose_until.store(fr + 300, std::memory_order_relaxed);
+    g_trail_n.store(0, std::memory_order_relaxed);
+    alog("[ft] === LEVEL STATE CHANGE: g_pGameLevel=%p (verbose through frame %llu) ===",
+        lvl, (unsigned long long)(fr + 300));
+}
+} // namespace ft
+#endif // Android
 
 bool CRenderDevice::RenderBegin()
 {
@@ -233,11 +679,31 @@ void CRenderDevice::DoRender()
     CStatTimer renderTotalReal;
     renderTotalReal.FrameStart();
     renderTotalReal.Begin();
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::install();
+    ft::set_phase(ft::PH_RENDER_BEGIN);
+    ft::note("DoRender: enter");
+    ft::vlog("[ft] frame %llu | DoRender begin (b_is_Active=%d, level=%p)",
+        (unsigned long long)ft::g_frame.load(std::memory_order_relaxed), (int)b_is_Active, g_pGameLevel);
+#endif
     if (b_is_Active && RenderBegin())
     {
         {
             ZoneScopedN("Render process");
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+            ft::set_phase(ft::PH_SEQ_RENDER);
+            ft::note("seqRender.Process: begin");
+            ft::vlog("[ft] frame %llu | seqRender.Process begin",
+                (unsigned long long)ft::g_frame.load(std::memory_order_relaxed));
+#endif
             seqRender.Process(); // all rendering is done here
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+            ft::note("seqRender.Process: end");
+            ft::vlog("[ft] frame %llu | seqRender.Process end",
+                (unsigned long long)ft::g_frame.load(std::memory_order_relaxed));
+            ft::set_phase(ft::PH_IMGUI);
+            ft::note("imgui+viewports");
+#endif
         }
 
         CalcFrameStats();
@@ -247,7 +713,18 @@ void CRenderDevice::DoRender()
         m_imgui_render->Render(ImGui::GetDrawData());
         UpdateViewports();
 
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+        ft::set_phase(ft::PH_RENDER_END);
+        ft::note("RenderEnd(present/swap): begin");
+        ft::vlog("[ft] frame %llu | RenderEnd (swap/present) begin",
+            (unsigned long long)ft::g_frame.load(std::memory_order_relaxed));
+#endif
         RenderEnd(); // Present goes here
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+        ft::note("RenderEnd(present/swap): end");
+        ft::vlog("[ft] frame %llu | RenderEnd (swap/present) end",
+            (unsigned long long)ft::g_frame.load(std::memory_order_relaxed));
+#endif
     }
     else
     {
@@ -262,12 +739,44 @@ void CRenderDevice::ProcessFrame()
 {
     ZoneScoped;
 
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::install();
+    ft::set_phase(ft::PH_FRAME_START);
+    static IGame_Level* ft_last_level = nullptr;
+    if (g_pGameLevel != ft_last_level)
+    {
+        ft_last_level = g_pGameLevel;
+        ft::level_changed(g_pGameLevel);
+    }
+    const u64 ft_frame = ft::g_frame.load(std::memory_order_relaxed);
+    ft::note("ProcessFrame: enter");
+    ft::vlog("[ft] ===== frame %llu BEGIN (level=%p, paused=%d) =====",
+        (unsigned long long)ft_frame, g_pGameLevel, (int)Paused());
+#endif
+
     if (!BeforeFrame())
         return;
 
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::set_phase(ft::PH_BEFORE_FRAME);
+    ft::note("BeforeFrame: done");
+#endif
+
     const u64 frameStartTime = TimerGlobal.GetElapsed_ms();
 
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::set_phase(ft::PH_FRAME_MOVE);
+    ft::note("FrameMove: begin");
+    ft::vlog("[ft] frame %llu | FrameMove (update/scripts) begin", (unsigned long long)ft_frame);
+#endif
     FrameMove();
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::note("FrameMove: end");
+    ft::vlog("[ft] frame %llu | FrameMove end (t=%llums)", (unsigned long long)ft_frame,
+        (unsigned long long)(TimerGlobal.GetElapsed_ms() - frameStartTime));
+    ft::set_phase(ft::PH_CAMERA);
+    ft::note("OnCameraUpdated");
+#endif
 
     OnCameraUpdated();
 
@@ -280,9 +789,26 @@ void CRenderDevice::ProcessFrame()
         seqFrameMT.Process();
     });
 
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::set_phase(ft::PH_PARALLEL);
+    ft::note("DoRender: dispatched (seqParallel task queued)");
+#endif
     DoRender();
 
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::set_phase(ft::PH_TASK_WAIT);
+    ft::note("TaskScheduler->Wait: begin");
+    ft::vlog("[ft] frame %llu | waiting on parallel task", (unsigned long long)ft_frame);
+#endif
     TaskScheduler->Wait(processSeqParallel);
+
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::note("TaskScheduler->Wait: end");
+    ft::vlog("[ft] frame %llu | frame complete (t=%llums) -- all phases OK",
+        (unsigned long long)ft_frame, (unsigned long long)(TimerGlobal.GetElapsed_ms() - frameStartTime));
+    ft::set_phase(ft::PH_FRAME_END);
+    ft::g_frame.store(ft_frame + 1, std::memory_order_relaxed);
+#endif
 
     const u64 frameEndTime = TimerGlobal.GetElapsed_ms();
     const u64 frameTime = frameEndTime - frameStartTime;
@@ -306,6 +832,12 @@ void CRenderDevice::ProcessEvent(const SDL_Event& event)
 {
     ZoneScoped;
 
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::set_phase(ft::PH_MAIN_LOOP_EVENTS);
+    ft::note("ProcessEvent: enter");
+    ft::vlog("[ft] ProcessEvent type=0x%08x", (unsigned)event.type);
+#endif
+
     switch (event.type)
     {
     case SDL_DISPLAYEVENT:
@@ -318,7 +850,12 @@ void CRenderDevice::ProcessEvent(const SDL_Event& event)
             CleanupVideoModes();
             FillVideoModes();
             if (event.display.display == psDeviceMode.Monitor && event.display.type != SDL_DISPLAYEVENT_CONNECTED)
+            {
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+                ft::reset_mark("Reset() from SDL_DISPLAYEVENT");
+#endif
                 Reset();
+            }
             else
                 UpdateWindowProps();
             break;
@@ -369,6 +906,9 @@ void CRenderDevice::ProcessEvent(const SDL_Event& event)
                 psDeviceMode.Width = event.window.data1;
                 psDeviceMode.Height = event.window.data2;
 
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+                ft::reset_mark("Reset() from SDL_WINDOWEVENT_SIZE_CHANGED");
+#endif
                 Reset();
             }
             if (viewport)
@@ -394,6 +934,10 @@ void CRenderDevice::ProcessEvent(const SDL_Event& event)
     } // switch (event.type)
 
     editor().ProcessEvent(event);
+
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::note("ProcessEvent: end");
+#endif
 }
 
 void CRenderDevice::Run()
@@ -481,7 +1025,16 @@ void CRenderDevice::FrameMove()
     // TODO: HACK to test loading screen.
     // if(!g_bLoaded)
 
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::set_phase(ft::PH_FRAME_MOVE);
+    ft::note("FrameMove: seqFrame.Process begin");
+#endif
     seqFrame.Process();
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::note("FrameMove: seqFrame.Process end");
+    ft::vlog("[ft] frame %llu | seqFrame.Process (event pump / eStart) returned",
+        (unsigned long long)ft::g_frame.load(std::memory_order_relaxed));
+#endif
 
     g_bLoaded = true;
     // else
@@ -489,7 +1042,15 @@ void CRenderDevice::FrameMove()
     stats.EngineTotal.End();
     stats.EngineTotal.FrameEnd();
 
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::note("FrameMove: ImGui::EndFrame");
+#endif
     ImGui::EndFrame();
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+    ft::note("FrameMove: end");
+    ft::vlog("[ft] frame %llu | FrameMove end",
+        (unsigned long long)ft::g_frame.load(std::memory_order_relaxed));
+#endif
 }
 
 ENGINE_API bool bShowPauseString = true;

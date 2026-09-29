@@ -14,10 +14,13 @@
 
 /////////////////////////////////////////////////////////////////////////////
 // GLD_P - gbuffer_load_data
+// The callers pass struct members declared as float4 (e.g. v2p_volume::tc), but
+// gbuffer_load_data only takes float2. HLSL truncated that implicitly, GLSL ES
+// does not, so the .xy is explicit here.
 #ifdef	GBUFFER_OPTIMIZATION
-	#define	GLD_P( _tc, _pos2d, _iSample ) _tc, _pos2d, _iSample
+	#define	GLD_P( _tc, _pos2d, _iSample ) (_tc).xy, _pos2d, _iSample
 #else	//	GBUFFER_OPTIMIZATION
-	#define	GLD_P( _tc, _pos2d, _iSample ) _tc, _iSample
+	#define	GLD_P( _tc, _pos2d, _iSample ) (_tc).xy, _iSample
 #endif	//	GBUFFER_OPTIMIZATION
 
 /////////////////////////////////////////////////////////////////////////////

@@ -32,6 +32,13 @@ layout(location = TEXCOORD1)		in float4	v_model_ind		; // (x=m-index0, y=m-index
 
 layout(location = TEXCOORD0) 		out float2	vf_model_tc0		; // TEXCOORD0;
 layout(location = COLOR0) 		out float4	vf_model_c0		; // COLOR0;
+//	This vertex shader is paired with the particle pixel shaders (see models_x*.s), and they
+//	declare a TEXCOORD1 input for soft particles. Without a matching output the link fails
+//	with "input p_particle_tctexgen not declared in output from previous stage".
+#ifdef	USE_SOFT_PARTICLES
+uniform float4x4 mVPTexgen;
+layout(location = TEXCOORD1) 	out float4	v2p_vert_tctexgen	; // TEXCOORD1;
+#endif	//	USE_SOFT_PARTICLES
 
 vf   _main (v_model v);
 
@@ -85,5 +92,8 @@ void main()
 
 	vf_model_tc0 = O.tc0;
 	vf_model_c0 = O.c0;
+#ifdef	USE_SOFT_PARTICLES
+	v2p_vert_tctexgen = mul(mVPTexgen, I.P);
+#endif	//	USE_SOFT_PARTICLES
 	gl_Position = O.hpos;
 }

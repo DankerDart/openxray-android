@@ -99,6 +99,18 @@ function inventory_wnd_opened()
 	--printf("---:>Inventory opened")
 end
 
+-- `xr_sound` is not exported by the engine in this build, so indexing
+-- `xr_sound.sound_table` raised "attempt to index a nil value" right when the
+-- talk dialog opened, aborting UITalkWnd::Show(). Resolve the table once and
+-- only descend into it when it actually exists.
+function get_npc_sound_theme(npc_id)
+	local snd = xr_sound
+	if snd == nil then return nil end
+	local sound_table = snd.sound_table
+	if sound_table == nil then return nil end
+	return sound_table[npc_id]
+end
+
 function inventory_wnd_closed()
 	--printf("---:>Inventory closed")
 end
@@ -138,7 +150,7 @@ function dialog_wnd_showed()
 		if npc ~= nil then
 			local npc_id = npc:id()
 			if npc:is_talking() and npc_id ~= db.actor:id() then
-				local sound_theme = xr_sound.sound_table[npc_id]
+				local sound_theme = get_npc_sound_theme(npc_id)
 				if sound_theme and sound_theme.reset then
 					sound_theme:reset(npc_id)
 				end

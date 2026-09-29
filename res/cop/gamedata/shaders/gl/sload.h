@@ -65,7 +65,7 @@ void UpdateTC( inout p_bumped I )
 		float2	vTexOffsetPerStep	= fStepSize * vDelta;
 
 		//	Prepare start data for cycle
-		float2	vTexCurrentOffset	= I.tcdh;
+		float2	vTexCurrentOffset	= I.tcdh.xy;
 		float	fCurrHeight			= 0.0;
 		float	fCurrentBound		= 1.0;
 

@@ -78,6 +78,15 @@ public:
             break;
         }
 
+#if defined(XR_PLATFORM_ANDROID) && !defined(_EDITOR)
+        // Mobile GPUs (and especially Mali) are fill-rate bound: the advanced
+        // post-process chain (DOF, SSAO/HDAO, bloom, sun shafts, volumetrics,
+        // soft particles/water) adds several full-screen passes on top of an
+        // already heavy R2 pipeline. Off by default on Android; the user can
+        // still raise quality per-config.
+        ps_r2_advanced_pp = false;
+#endif
+
         GEnv.Render = &RImplementation;
         GEnv.RenderFactory = &RenderFactoryImpl;
         GEnv.DU = &DUImpl;

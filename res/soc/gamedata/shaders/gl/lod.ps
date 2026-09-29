@@ -67,7 +67,7 @@ f_deffer 	_main	( v2p I )
 
 	if( D.w-(96.0/255.0) >= 0 ) mask |= 0x1;
   
-	[unroll] for( int i = 1; i < MSAA_SAMPLES; ++i )
+	for( int i = 1; i < MSAA_SAMPLES; ++i )
 	{
 		float4 DI;
 		float4 HI;

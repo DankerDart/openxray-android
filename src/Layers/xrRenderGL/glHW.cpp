@@ -33,6 +33,30 @@ void CALLBACK OnDebugCallback(GLenum /*source*/, GLenum /*type*/, GLuint id, GLe
 
 static_assert(std::is_same_v<decltype(&OnDebugCallback), GLDEBUGPROC>);
 
+// GLES 3.0+ exposes the extension list through glGetStringi; older contexts and
+// desktop GL only have the single GL_EXTENSIONS string.
+bool CHW::HasExtension(cpcstr name)
+{
+    if (!name)
+        return false;
+
+    GLint num_extensions = 0;
+    glGetIntegerv(GL_NUM_EXTENSIONS, &num_extensions);
+    if (num_extensions > 0 && glGetStringi != nullptr)
+    {
+        for (GLint i = 0; i < num_extensions; ++i)
+        {
+            const auto ext = reinterpret_cast<cpcstr>(glGetStringi(GL_EXTENSIONS, i));
+            if (ext && xr_strcmp(ext, name) == 0)
+                return true;
+        }
+        return false;
+    }
+
+    const auto extensions = reinterpret_cast<cpcstr>(glGetString(GL_EXTENSIONS));
+    return extensions && strstr(extensions, name) != nullptr;
+}
+
 void UpdateVSync()
 {
     if (psDeviceFlags.test(rsVSync))
@@ -191,12 +215,36 @@ void CHW::CreateDevice(SDL_Window* hWnd)
     OpenGLVersionString = reinterpret_cast<pcstr>(glGetString(GL_VERSION));
     ShadingVersion = reinterpret_cast<pcstr>(glGetString(GL_SHADING_LANGUAGE_VERSION));
 
+    // gl_ClipDistance is not core GLSL ES. It only exists when the driver reports
+    // GL_EXT_clip_cull_distance, and the volumetric shaders can only redeclare
+    // gl_PerVertex to add it when that is the case. Desktop GL has it in core
+    // (GLSL 4.00+), so no extension query is needed there.
+#if defined(XR_PLATFORM_ANDROID) || defined(XRAY_USE_GLES)
+    ClipCullDistanceSupported = HasExtension("GL_EXT_clip_cull_distance");
+#else
+    ClipCullDistanceSupported = true;
+#endif
+
     Msg("* [GLES] Active Renderer: [%s]", AdapterName ? AdapterName : "Unknown");
     Msg("* [GLES] Active Vendor: [%s]", glGetString(GL_VENDOR) ? reinterpret_cast<pcstr>(glGetString(GL_VENDOR)) : "Unknown");
     Msg("* GPU vendor: [%s] device: [%s]", glGetString(GL_VENDOR), AdapterName);
     Msg("* GPU OpenGL version: %s", OpenGLVersionString);
     Msg("* GPU OpenGL shading language version: %s", ShadingVersion);
     Msg("* GPU OpenGL VTF units: [%d] CTI units: [%d]", iMaxVTFUnits, iMaxCTIUnits);
+    Msg("* GL_EXT_clip_cull_distance (hardware gl_ClipDistance): %s", ClipCullDistanceSupported ? "yes" : "no");
+
+    // The semantics map in shaders/gl/shared/common.h occupies locations 0..15, so
+    // every shader that uses TEXCOORD7 needs 16 varying vectors. GLSL ES 3.0 only
+    // guarantees 15, and drivers that sit at that minimum cannot link the water
+    // and bloom shaders at all.
+    GLint maxVaryingVectors = 0;
+    glGetIntegerv(GL_MAX_VARYING_VECTORS, &maxVaryingVectors);
+    Msg("* GL_MAX_VARYING_VECTORS: %d (16 required for TEXCOORD7)", maxVaryingVectors);
+    if (maxVaryingVectors > 0 && maxVaryingVectors < 16)
+    {
+        Msg("! warning: only %d varying vectors available, water/bloom shaders that use TEXCOORD7 will fail to link",
+            maxVaryingVectors);
+    }
 
     ComputeShadersSupported = false; // XXX: Implement compute shaders support
 
@@ -303,13 +351,21 @@ void CHW::EndScene() { }
 
 void CHW::Present()
 {
+    // The scene was rendered into offscreen targets sized Device.dwWidth x
+    // dwHeight. With internal resolution scaling active that is smaller than the
+    // window, so upscale into the default framebuffer (native size) on the way out.
+    const int src_w = (int)Device.dwWidth;
+    const int src_h = (int)Device.dwHeight;
+    const int dst_w = (int)psDeviceMode.Width;
+    const int dst_h = (int)psDeviceMode.Height;
+
     glBindFramebuffer(GL_READ_FRAMEBUFFER, pFB);
     glBindFramebuffer(GL_DRAW_FRAMEBUFFER, 0);
 
-    glBlitFramebuffer(
-        0, 0, Device.dwWidth, Device.dwHeight,
-        0, 0, Device.dwWidth, Device.dwHeight,
-        GL_COLOR_BUFFER_BIT, GL_NEAREST);
+    CHK_GL(glBlitFramebuffer(
+        0, 0, src_w, src_h,
+        0, 0, dst_w, dst_h,
+        GL_COLOR_BUFFER_BIT, GL_LINEAR));
 
     SDL_GL_SwapWindow(m_window);
     CurrentBackBuffer = (CurrentBackBuffer + 1) % BackBufferCount;

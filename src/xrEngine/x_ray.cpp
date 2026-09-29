@@ -18,6 +18,8 @@
 #include "LightAnimLibrary.h"
 #include "XR_IOConsole.h"
 
+#include "frame_trace.h"
+
 #if defined(XR_PLATFORM_APPLE)
 #include "macos/GameDataResolver.h"
 #endif
@@ -391,13 +393,16 @@ int CApplication::Run()
 
     while (!SDL_QuitRequested()) // SDL_PumpEvents is here
     {
+        FT_ML(ft::ML_PRE, "main loop top");
         FrameMarkStart(FRAME_MARK_APPLICATION_RUN);
         bool canCallActivate = false;
         bool shouldActivate = false;
 
         SDL_Event events[MAX_WINDOW_EVENTS];
+        FT_ML(ft::ML_EVENTS, "SDL_PeepEvents begin");
         const int count = SDL_PeepEvents(events, MAX_WINDOW_EVENTS,
             SDL_GETEVENT, SDL_WINDOWEVENT, SDL_WINDOWEVENT);
+        FT_ML(ft::ML_EVENTS, "SDL_PeepEvents end");
 
         for (int i = 0; i < count; ++i)
         {
@@ -441,16 +446,22 @@ int CApplication::Run()
 
             // Only process event in Device
             // if it wasn't processed in the switch above
+            FT_ML(ft::ML_EVENTS, "Device.ProcessEvent begin");
             Device.ProcessEvent(event);
+            FT_ML(ft::ML_EVENTS, "Device.ProcessEvent end");
         } // for (int i = 0; i < count; ++i)
 
         // Workaround for screen blinking when there's too much timeouts
         if (canCallActivate)
         {
+            FT_ML(ft::ML_ACTIVATE, "OnWindowActivate begin");
             Device.OnWindowActivate(Device.m_sdlWnd, shouldActivate);
+            FT_ML(ft::ML_ACTIVATE, "OnWindowActivate end");
         }
 
+        FT_ML(ft::ML_POST, "before ProcessFrame");
         Device.ProcessFrame();
+        FT_ML(ft::ML_POST, "after ProcessFrame");
 
         UpdateDiscordStatus();
         FrameMarkEnd(FRAME_MARK_APPLICATION_RUN);
